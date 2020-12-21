@@ -186,7 +186,10 @@ process.kappaTuple.Info.hltSource = cms.InputTag("TriggerResults", "", "HLT")
 process.kappaTuple.Info.overrideHLTCheck = cms.untracked.bool(True)
 
 # read in MET filter bits from RECO/PAT trigger results (use RECO for PromptReco)
-process.kappaTuple.TriggerObjectStandalone.metfilterbits = cms.InputTag("TriggerResults", "", "RECO")
+if options.isData:
+    process.kappaTuple.TriggerObjectStandalone.metfilterbits = cms.InputTag("TriggerResults", "", "RECO")
+else:
+    process.kappaTuple.TriggerObjectStandalone.metfilterbits = cms.InputTag("TriggerResults", "", "PAT")
 
 
 # write out HLT information for trigger names matching regex
@@ -232,6 +235,76 @@ process.goodOfflinePrimaryVertices = cms.EDFilter(
 process.kappaTask.add(process.goodOfflinePrimaryVertices)
 
 
+###########################
+# Configure PF Candidates #
+###########################
+
+# -- load default Kappa config for skimming PF candidates
+process.load("Kappa.Skimming.KPFCandidates_miniAOD_cff")
+
+# TODO: seems to do nothing -> pending review for deletion
+# -- filter PV collection to obtain "good" offline primary vertices
+from PhysicsTools.SelectorUtils.pvSelector_cfi import pvSelector
+process.goodOfflinePrimaryVertices = cms.EDFilter(
+    'PrimaryVertexObjectFilter',
+    filterParams=pvSelector.clone(maxZ = 24.0),  # ndof >= 4, rho <= 2
+    src=cms.InputTag('offlineSlimmedPrimaryVertices'),
+)
+
+# for an explanation of 'fromPV', refer to:
+# https://twiki.cern.ch/twiki/bin/view/CMSPublic/WorkBookMiniAOD2016#PV_Assignment
+
+# -- apply filters to obtain some special PF candidate collections
+
+# PF candidates likely not from pileup
+process.pfNoPileUpIso = cms.EDFilter("CandPtrSelector",
+    src = cms.InputTag("packedPFCandidates"),
+    cut = cms.string("fromPV > 1")  # high 'fromPV' score
+)
+
+# PF candidates possibly from pileup
+process.pfPileUpIso = cms.EDFilter("CandPtrSelector",
+    src = cms.InputTag("packedPFCandidates"),
+    cut = cms.string("fromPV <= 1")  # low 'fromPV' score
+)
+
+# PF candidates marked as neutral hadrons or photons
+process.pfAllNeutralHadronsAndPhotons = cms.EDFilter("CandPtrSelector",
+    src = cms.InputTag("pfNoPileUp"),
+    cut = cms.string(
+        "abs(pdgId) = 111  | "  # neutral pion
+        "abs(pdgId) = 130  | "  # neutral kaon (long)
+        "abs(pdgId) = 310  | "  # neutral kaon (short)
+        "abs(pdgId) = 2112 | "  # neutron
+        "abs(pdgId) = 22"       # photon
+    )
+)
+
+process.path *= (
+    process.goodOfflinePrimaryVertices*
+    process.pfNoPileUpIso*
+    process.pfPileUpIso*
+    process.makeKappaPFCandidates*
+    process.pfAllNeutralHadronsAndPhotons
+)
+
+process.packedPFCandidatesCHSNotFromPV = cms.EDFilter('CandPtrSelector',
+    src = cms.InputTag('packedPFCandidates'),
+    cut = cms.string('fromPV==0')  # only loose selection (0)
+)
+process.path *= (process.packedPFCandidatesCHSNotFromPV)
+
+process.packedPFCandidatesCHS = cms.EDFilter('CandPtrSelector',
+    src = cms.InputTag('packedPFCandidates'),
+    cut = cms.string('fromPV() > 0')  # only loose selection (0)
+)
+process.path *= (process.packedPFCandidatesCHS)
+
+
+process.kappaTuple.active += cms.vstring('packedPFCandidates')
+process.kappaTuple.packedPFCandidates.pfCandidates = cms.PSet(src=cms.InputTag("packedPFCandidates"))
+
+
 ###################
 # Configure Muons #
 ###################
@@ -265,46 +338,84 @@ for iso_label in ["muPFIsoDepositCharged",
 process.kappaTuple.Muons.noPropagation = cms.bool(True)  # TODO: document this
 
 
-#######################
-# Configure Electrons #
-#######################
-
-from Kappa.Skimming.KElectrons_miniAOD_cff import setupElectrons
-
-# -- load default Kappa config for skimming electrons
-process.load("Kappa.Skimming.KElectrons_miniAOD_cff")
-process.kappaTuple.active += cms.vstring('Electrons')
-
-# -- set basic skimming parameters
-process.kappaTuple.Electrons.minPt = 8.0
-process.kappaTuple.Electrons.electrons.src = cms.InputTag("slimmedElectrons")
-# TODO: check which one of these is actually used
-process.kappaTuple.Electrons.electrons.vertexcollection = cms.InputTag("offlineSlimmedPrimaryVertices")
-process.kappaTuple.Electrons.vertexcollection = cms.InputTag("offlineSlimmedPrimaryVertices")
-
-# -- electron isolation
-process.kappaTuple.Electrons.electrons.rhoIsoInputTag = cms.InputTag("slimmedJets", "rho")
-
-# -- electron IDs
-process.kappaTuple.Electrons.srcIds = cms.string("standalone");
-process.kappaTuple.Electrons.ids = cms.VInputTag(
-    # cut-based VIDs
-    "egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V1-veto",
-    "egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V1-loose",
-    "egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V1-medium",
-    "egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V1-tight",
-    #
-    "egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V2-loose",
-    "egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V2-medium",
-    "egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V2-tight",
-)
+########################
+## Configure Electrons #
+########################
+#
+#from RecoEgamma.EgammaTools.EgammaPostRecoTools import setupEgammaPostRecoSeq
+#setupEgammaPostRecoSeq(process,
+#                       runVID=False, #saves CPU time by not needlessly re-running VID, if you want the Fall17V2 IDs, set this to True or remove (default is True)
+#                       era='2017-UL')
+#
+#process.path *= process.egammaPostRecoSeq
+#
+#from Kappa.Skimming.KElectrons_miniAOD_cff import setupElectrons
+#
+## -- load default Kappa config for skimming electrons
+#process.load("Kappa.Skimming.KElectrons_miniAOD_cff")
+#process.kappaTuple.active += cms.vstring('Electrons')
+#
+## -- set basic skimming parameters
+#process.kappaTuple.Electrons.minPt = 8.0
+#process.kappaTuple.Electrons.electrons.src = cms.InputTag("slimmedElectrons")
+## TODO: check which one of these is actually used
+#process.kappaTuple.Electrons.electrons.vertexcollection = cms.InputTag("offlineSlimmedPrimaryVertices")
+#process.kappaTuple.Electrons.vertexcollection = cms.InputTag("offlineSlimmedPrimaryVertices")
+#
+## -- electron isolation
+#process.kappaTuple.Electrons.electrons.rhoIsoInputTag = cms.InputTag("slimmedJets", "rho")
+#
+## -- electron IDs
+#process.kappaTuple.Electrons.srcIds = cms.string("pat")
+#process.kappaTuple.Electrons.ids = cms.VInputTag(
+#    # cut-based VIDs
+#    cms.InputTag("egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V2-veto"),
+#    cms.InputTag("egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V2-loose"),
+#    cms.InputTag("egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V2-medium"),
+#    cms.InputTag("egmGsfElectronIDs:cutBasedElectronID-Fall17-94X-V2-tight"),
+#    # MVA IDs
+#    cms.InputTag("egmGsfElectronIDs:mvaEleID-Fall17-noIso-V2-wp90"),
+#    cms.InputTag("egmGsfElectronIDs:mvaEleID-Fall17-noIso-V2-wp80"),
+#    cms.InputTag("egmGsfElectronIDs:mvaEleID-Fall17-noIso-V2-wpLoose"),
+#    cms.InputTag("egmGsfElectronIDs:mvaEleID-Fall17-iso-V2-wp90"),
+#    cms.InputTag("egmGsfElectronIDs:mvaEleID-Fall17-iso-V2-wp80"),
+#    cms.InputTag("egmGsfElectronIDs:mvaEleID-Fall17-iso-V2-wpLoose"),
+#)
+#
+## -- electron corrections
+#process.kappaTuple.Electrons.userFloats = cms.VInputTag(
+#        # scale & smear corrected energy (applied on Data AND MC)
+#        cms.InputTag("electronCorrection:ecalTrkEnergyPreCorr"),
+#        cms.InputTag("electronCorrection:ecalTrkEnergyPostCorr"),
+#        cms.InputTag("electronCorrection:ecalTrkEnergyErrPreCorr"),
+#        cms.InputTag("electronCorrection:ecalTrkEnergyErrPostCorr"),
+#
+#        # systematic variations for scale & smear corrections (to be used on MC)
+#        cms.InputTag("electronCorrection:energyScaleUp"),
+#        cms.InputTag("electronCorrection:energyScaleDown"),
+#        cms.InputTag("electronCorrection:energyScaleStatUp"),
+#        cms.InputTag("electronCorrection:energyScaleStatDown"),
+#        cms.InputTag("electronCorrection:energyScaleSystUp"),
+#        cms.InputTag("electronCorrection:energyScaleSystDown"),
+#        cms.InputTag("electronCorrection:energyScaleGainUp"),
+#        cms.InputTag("electronCorrection:energyScaleGainDown"),
+#        cms.InputTag("electronCorrection:energySigmaUp"),
+#        cms.InputTag("electronCorrection:energySigmaDown"),
+#        cms.InputTag("electronCorrection:energySigmaPhiUp"),
+#        cms.InputTag("electronCorrection:energySigmaPhiDown"),
+#        cms.InputTag("electronCorrection:energySigmaRhoUp"),
+#        cms.InputTag("electronCorrection:energySigmaRhoDown"),
+#
+#        cms.InputTag("electronMVAValueMapProducer:ElectronMVAEstimatorRun2Fall17NoIsoV2Values"),
+#        cms.InputTag("electronMVAValueMapProducer:ElectronMVAEstimatorRun2Fall17IsoV2Values"),
+#        )
 
 
 # -- call the default KAPPA electron setup routine
-setupElectrons(process, "slimmedElectrons", id_modules=['RecoEgamma.ElectronIdentification.Identification.cutBasedElectronID_Fall17_94X_V1_cff', 'RecoEgamma.ElectronIdentification.Identification.cutBasedElectronID_Fall17_94X_V2_cff'])
+# setupElectrons(process, "slimmedElectrons", id_modules=['RecoEgamma.ElectronIdentification.Identification.cutBasedElectronID_Fall17_94X_V1_cff', 'RecoEgamma.ElectronIdentification.Identification.cutBasedElectronID_Fall17_94X_V2_cff'])
 
-# -- add electron ID task to KAPPA Task
-process.kappaTask.add(process.egmGsfElectronIDTask)
+# # -- add electron ID task to KAPPA Task
+# process.kappaTask.add(process.egmGsfElectronIDTask)
 
 
 ######################
@@ -367,7 +478,7 @@ for _jet_algo_radius in ('ak4', 'ak8'):
 ######################
 
 # go through all combinations of jet radius and PU subtraction algorithms
-for _jet_radius in (4, 8):
+for _jet_radius in [4]:
     for _PU_method in ("", "CHS", "Puppi"):
         _jet_collection_name = "ak%dPFJets%s" % (_jet_radius, _PU_method)
         _patJet_collection_name = "AK%dPF%s" % (_jet_radius, _PU_method)
@@ -417,68 +528,28 @@ process.kappaTuple.PileupDensity.rename = cms.vstring("fixedGridRhoFastjetAll =>
 
 from PhysicsTools.PatUtils.tools.runMETCorrectionsAndUncertainties import runMetCorAndUncFromMiniAOD
 
-## create collection of PF candidates likely coming from the primary vertex
-#process.packedPFCandidatesCHSNotFromPV = cms.EDFilter('CandPtrSelector',
-#    src = cms.InputTag('packedPFCandidates'),
-#    cut = cms.string('fromPV==0')  # only loose selection (0)
-#)
-#process.path *= (process.packedPFCandidatesCHSNotFromPV)
-#process.packedPFCandidatesCHS = cms.EDFilter('CandPtrSelector',
-#    src = cms.InputTag('packedPFCandidates'),
-#    cut = cms.string('fromPV() > 0')  # only loose selection (0)
-#)
-#process.path *= (process.packedPFCandidatesCHS)
-
-# -- start of MET recipe
-
-# the following lines are for default MET for Type1 corrections
-
-# If you only want to re-correct for JEC and get the proper uncertainties for the default MET
-runMetCorAndUncFromMiniAOD(process,
-                           isData=options.isData,
-                           # pfCandColl='packedPFCandidatesCHS',
-                           # recoMetFromPFCs=True
-                           )
-
-# TODO: check if the JetToolBox does this already
-## If you would like to re-cluster both jets and met and get the proper uncertainties
-#runMetCorAndUncFromMiniAOD(process,
-#                           isData=options.isData,
-#                           pfCandColl=cms.InputTag("packedPFCandidates"),
-#                           recoMetFromPFCs=True,
-#                           CHS = True, # this is an important step and determines what type of jets to be reclustered
-#                           reclusterJets = True
-#                           )
-
-#process.kappaTuple.active += cms.vstring('packedPFCandidates')
-#process.kappaTuple.packedPFCandidates.pfCandidates = cms.PSet(src=cms.InputTag("packedPFCandidates"))
-
-# wire CHS MET to new collection from the "KAPPA" process
-process.kappaTuple.PatMET.metCHS = cms.PSet(src=cms.InputTag("slimmedMETs"),
-                                            uncorrected=cms.bool(True))
-if not options.isData:
-    # MC: wire PF MET to older collection from the PAT process
-    process.kappaTuple.PatMET.metPF = cms.PSet(src=cms.InputTag("slimmedMETs", "", "PAT"),
-                                               uncorrected=cms.bool(True))
-else:
-    # no PAT process in data -> use RECO
-    # process.kappaTuple.PatMET.metPF = cms.PSet(src=cms.InputTag("slimmedMETs", "", "RECO"),
-    #                                            uncorrected=cms.bool(True))
-    process.kappaTuple.PatMET.metPF = cms.PSet(src=cms.InputTag("slimmedMETs"),
-                                               uncorrected=cms.bool(True))
 
 
-# this should be OK: 'slimmedMETsPuppi' is in miniAOD
-process.kappaTuple.PatMET.metPuppi = cms.PSet(src=cms.InputTag("slimmedMETsPuppi"),
-                                              uncorrected=cms.bool(True))
+# re-correct MET for JEC and get the proper uncertainties
+# Note: this only affects the default (i.e. Type1-corrected) MET.
+# Since we only write out the raw MET, this line likely has no effect.
+runMetCorAndUncFromMiniAOD(process, isData=options.isData)
 
-# uncorrect MET: correcting step done in Excalibur for calibration purposes
-process.kappaTuple.PatMET.uncorrected = cms.bool(True)
 
 # -- end of MET recipe
 
+# wire miniAOD METs to collection from the "KAPPA" process
+process.kappaTuple.PatMET.metPF = cms.PSet(src=cms.InputTag("slimmedMETs"), correctionLevel=cms.string('Raw'))
+process.kappaTuple.PatMET.metCHS = cms.PSet(src=cms.InputTag("slimmedMETs"), correctionLevel=cms.string('RawChs'))
+process.kappaTuple.PatMET.metPuppi = cms.PSet(src=cms.InputTag("slimmedMETsPuppi"), correctionLevel=cms.string('Raw'))
+
 # -- activate KAPPA producers
 process.kappaTuple.active += cms.vstring('PatMET')
+
+##############
+# Genweight  #
+##############
+process.kappaTuple.Info.genWeightNames = cms.PSet()
 
 
 
@@ -520,7 +591,6 @@ process.path.insert(-1, process.nEventsFiltered + process.nNegEventsFiltered)
 
 # make Kappa branch 'FilterSummary' active
 process.kappaTuple.active += cms.vstring('FilterSummary')
-
 
 #########################
 # Testing and Debugging #
